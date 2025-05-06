@@ -1,23 +1,6 @@
-# GAN with Gradient Reversal Layer
-Implemented with Chainer and PyTorch.
+# GAN with Gradient Reversal Layer and Jacobian Descent
 
-Ganin, Yaroslav, et al. "Domain-adversarial training of neural networks." The Journal of Machine Learning Research 17.1 (2016): 2096-2030.
-
-## Requirements (Chainer)
-Chainer, OpenCV, NumPy
-
-```bash
-$ pip install chainer opencv-python numpy
-```
-
-## Requirements (PyTorch)
-PyTorch, Ignite, OpenCV, NumPy
-
-PyTorch: see the [official document](https://pytorch.org/get-started/locally/).
-
-```bash
-$ pip install pytorch-ignite opencv-python numpy
-```
+The idea is to train a GAN with a gradient reversal layer and to optimize it with Jacobian Descent using Torchjd.
 
 ## Training of GAN
 ```bash
