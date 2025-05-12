@@ -1,5 +1,6 @@
 
 import torch
+from torch import autograd
 from torch import nn
 import torch.nn.functional as F
 from torch.utils import data
@@ -13,7 +14,8 @@ import cv2
 
 import pprint
 from pathlib import Path
-
+from torchjd import autojac
+from torchjd.aggregation import UPGrad
 
 def parse_args():
     import argparse
@@ -28,17 +30,33 @@ def parse_args():
     parser.add_argument("-e", type=int, default=100, help="epoch")
     parser.add_argument("-r", default="result", help="result directory")
     parser.add_argument("--save_model", action="store_true", help="save models")
-    parser.add_argument("-g", type=int, default=-1, help="GPU id (negative value indicates CPU)")
+    parser.add_argument("-g", type=int, default=0, help="GPU id (negative value indicates CPU)")
+    parser.add_argument("-t", type=str, default="autograd.backward", help="Training mode between autograd.backward and autojac.backward")
 
     args = parser.parse_args()
     pprint.pprint(vars(args))
     main(args)
 
 
+def print_weights(_, _1, weights: torch.Tensor) -> None:
+    print(weights, end="")
+
+
+def print_cosine_similarity(_, inputs: torch.Tensor, aggregation: torch.Tensor) -> None:
+    matrix = inputs[0]
+    gd_output = matrix.mean(dim=0)
+    cosine_similarity = F.cosine_similarity(aggregation, gd_output, dim=0)
+    
+    print(f"Cosine similarity: {cosine_similarity.item():.4f}")
+
+
 def main(args):
     if args.g >= 0 and torch.cuda.is_available():
         device = torch.device(f"cuda:{args.g:d}")
         print(f"GPU mode: {args.g}")
+    elif args.g >= 0 and torch.backends.mps.is_available():
+        device = torch.device("mps")
+        print("MPS mode")
     else:
         device = torch.device("cpu")
         print("CPU mode")
@@ -53,10 +71,11 @@ def main(args):
                         transform=lambda x: np.expand_dims(np.asarray(x, dtype=np.float32), 0) / 255)
     train_loader = data.DataLoader(mnist_train, batch_size=args.b, shuffle=True)
 
-    model = GAN(args.z).to(device)
+    model = GAN(args.z, device=device).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=0.0002, betas=(0.5, 0.9))
 
-    trainer = Engine(GANTrainer(model, opt, device))
+    training_mode = args.t
+    trainer = Engine(GANTrainer(model, opt, device, training_mode))
     logger = GANLogger(model, train_loader, device)
     trainer.add_event_handler(Events.EPOCH_COMPLETED, logger)
     trainer.add_event_handler(Events.EPOCH_COMPLETED, print_loss(logger))
@@ -69,10 +88,14 @@ def main(args):
 
 
 class GANTrainer:
-    def __init__(self, gan, opt, device):
+    def __init__(self, gan, opt, device, training_mode):
         self.gan = gan
         self.opt = opt
         self.device = device
+        self.training_mode = training_mode
+        self.aggregator = UPGrad()
+        self.aggregator.weighting.register_forward_hook(print_weights)
+        self.aggregator.register_forward_hook(print_cosine_similarity)
 
     def __call__(self, engine, batch):
         self.gan.train()
@@ -82,8 +105,14 @@ class GANTrainer:
         x_real = x_real.to(self.device)
 
         loss_fake, loss_real = self.gan(x_real)
-        loss = loss_fake + loss_real
-        loss.backward()
+
+        if self.training_mode == "autograd.backward":
+            autograd.backward(loss_fake + loss_real)
+        elif self.training_mode == "autojac.backward":
+            autojac.backward(tensors=[loss_fake, loss_real], aggregator=self.aggregator)
+        else:
+            raise ValueError(f"Unknown training mode: {self.training_mode}")
+        
         self.opt.step()
 
         return {
@@ -151,15 +180,23 @@ def save_img(generator: nn.Module, out_dir_path: Path, zdim: int, device):
     def _save(engine):
         generator.eval()
 
-        z = np.random.uniform(size=(1, zdim)).astype(np.float32)
+        z = np.random.uniform(size=(25, zdim)).astype(np.float32)
         z = torch.from_numpy(z).to(device)
+
         with torch.no_grad():
-            img = generator(z)
-        img = img.cpu().detach().numpy().squeeze() * 255
-        img = img.astype(np.uint8)
+            imgs = generator(z)
+            
+        imgs = imgs.cpu().detach().numpy() * 255
+        imgs = imgs.astype(np.uint8)
+
+        grid_img = np.zeros((28*5, 28*5), dtype=np.uint8)
+        for i in range(5):
+            for j in range(5):
+                idx = i * 5 + j
+                grid_img[i*28:(i+1)*28, j*28:(j+1)*28] = imgs[idx].squeeze()
 
         p = out_dir_path / f"out_epoch_{engine.state.epoch:03d}.png"
-        cv2.imwrite(str(p), img)
+        cv2.imwrite(str(p), grid_img)
 
     return _save
 
@@ -265,7 +302,7 @@ class GradientReversalLayer(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        return - grad_output
+        return - 0.1 * grad_output
 
 
 def gradient_reversal_layer(x):
